@@ -1,0 +1,19 @@
+// 1. Directivas del preprocesador
+#include <stdio.h> <conio.h>
+
+// 2. Declaraciones Globales (variables o prototipos de funciones)
+int edad = 13
+
+// 3. Función Principal
+int main() {
+    // Declaración de variables locales
+    printf("Hola Mundo\n " edad );
+    
+    // Sentencias y lógica
+    return 0; // Finaliza el programa
+}
+
+// 4. Funciones definidas por el usuario
+void miFuncion() {
+    // Código de la función
+}
