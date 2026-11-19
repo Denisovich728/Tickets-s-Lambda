@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import api from '../api/axios';
 import { Users, Plus, QrCode, Trash2, Edit2, CheckCircle, XCircle, Camera, Download, FileText, Smartphone, User } from 'lucide-react';
-import QRCode from 'qrcode';
-import html2canvas from 'html2canvas';
+import { generateQRDataURL } from '../utils/qrEngine';
+import { toJpeg } from 'html-to-image';
 import { saveAs } from 'file-saver';
 
 export default function StaffProfiles() {
@@ -64,44 +64,26 @@ export default function StaffProfiles() {
         }
     };
 
-    const stripOklch = (clonedDoc) => {
-        const allElements = clonedDoc.querySelectorAll('*');
-        allElements.forEach(el => {
-            const style = el.getAttribute('style') || '';
-            if (style.includes('oklch')) {
-                el.setAttribute('style', style.replace(/oklch\([^)]+\)/g, '#1e293b'));
-            }
-            ['color','backgroundColor','borderColor'].forEach(prop => {
-                if (el.style[prop] && el.style[prop].includes('oklch')) {
-                    el.style[prop] = '#1e293b';
-                }
-            });
-        });
-    };
-
     const downloadBadge = async (id) => {
         const element = document.getElementById(id);
         if (!element) return;
-        
+
         try {
-            const canvas = await html2canvas(element, { 
-                scale: 2, 
+            const dataUrl = await toJpeg(element, {
+                quality: 0.95,
+                pixelRatio: 2,
                 backgroundColor: '#0f172a',
-                useCORS: true,
-                allowTaint: true,
-                onclone: (_doc, _el) => stripOklch(_el.ownerDocument)
+                skipFonts: true,
             });
-            canvas.toBlob((blob) => {
-                saveAs(blob, `Badge-${badgeData.name}.jpg`);
-            }, 'image/jpeg', 0.95);
+            saveAs(dataUrl, `Badge-${badgeData.name}.jpg`);
         } catch (error) {
             console.error(error);
         }
     };
 
-    const showBadge = async (staff) => {
+    const showBadge = (staff) => {
         try {
-            const url = await QRCode.toDataURL(staff.qrCodeData);
+            const url = generateQRDataURL(staff.qrCodeData, { width: 256, margin: 0 });
             setBadgeData({ ...staff, qrUrl: url });
         } catch (error) {
             console.error(error);

@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import api from '../api/axios';
 import * as fabric from 'fabric';
 import { Loader2, RefreshCw, Layers } from 'lucide-react';
+import EventNavTabs from '../components/EventNavTabs';
 
 export default function SeatMonitor() {
     const { id } = useParams();
@@ -33,7 +34,9 @@ export default function SeatMonitor() {
             // 1. Fetch Event (Layout)
             const eventRes = await api.get(`/events/${id}`);
             setEvent(eventRes.data);
-            const layout = eventRes.data.layout ? JSON.parse(eventRes.data.layout) : null;
+            const layout = eventRes.data.layout
+                ? (typeof eventRes.data.layout === 'string' ? JSON.parse(eventRes.data.layout) : eventRes.data.layout)
+                : null;
 
             // 2. Fetch Tickets (Status) - Need endpoint for ALL tickets of event
             // We assume /tickets/event/:id exists or we filter from generic.
@@ -55,56 +58,62 @@ export default function SeatMonitor() {
             const tickets = ticketsRes.data;
 
             // Stats
-            const sold = tickets.length;
+            const sold = tickets.filter(t => t.status !== 'revoked').length;
             const entered = tickets.filter(t => t.status === 'used').length;
 
             if (layout && c) {
-                c.loadFromJSON(layout, () => {
-                    const objects = c.getObjects();
-                    let totalSeats = 0;
+                await c.loadFromJSON(layout);
+                let totalSeats = 0;
 
-                    const processObject = (obj) => {
-                        if (obj.type === 'group') {
-                            obj.getObjects().forEach(processObject);
-                            // Also check the group itself if it has seatLabel property
-                            if (obj.seatLabel) updateObjectColor(obj, tickets);
+                const updateShapeColor = (target, ticket) => {
+                    if (ticket && ticket.status !== 'revoked') {
+                        if (ticket.status === 'used') {
+                            target.set('fill', '#ef4444'); // Red - Entered
+                            if (target.stroke) target.set('stroke', '#7f1d1d');
                         } else {
-                            if (obj.seatLabel) {
-                                totalSeats++;
-                                updateObjectColor(obj, tickets);
-                            }
+                            target.set('fill', '#eab308'); // Yellow - Sold
+                            if (target.stroke) target.set('stroke', '#a16207');
                         }
-                    };
-
-                    const updateObjectColor = (obj, tickets) => {
-                        const ticket = tickets.find(t => t.seatId === obj.seatLabel);
-                        if (ticket) {
-                            if (ticket.status === 'used') {
-                                obj.set('fill', '#ef4444'); // Red - Entered
-                                if (obj.stroke) obj.set('stroke', '#7f1d1d');
-                            } else {
-                                obj.set('fill', '#eab308'); // Yellow - Sold
-                                if (obj.stroke) obj.set('stroke', '#a16207');
-                            }
-                        } else {
-                            obj.set('fill', '#22c55e'); // Green - Available
-                            if (obj.stroke) obj.set('stroke', '#15803d');
-                        }
+                    } else {
+                        target.set('fill', '#22c55e'); // Green - Available
+                        if (target.stroke) target.set('stroke', '#15803d');
                     }
+                };
 
-                    // Loop top level
-                    c.getObjects().forEach(obj => {
+                const updateSeatVisual = (obj) => {
+                    if (!obj.seatLabel) return;
+                    totalSeats++;
+                    const ticket = tickets.find(t => t.seatId === obj.seatLabel && t.status !== 'revoked');
+
+                    if (typeof obj.getObjects === 'function') {
+                        obj.getObjects().forEach(child => {
+                            const childType = child.type?.toLowerCase();
+                            if (childType !== 'text' && childType !== 'i-text') {
+                                updateShapeColor(child, ticket);
+                            }
+                        });
+                        obj.set('dirty', true);
+                    } else {
+                        updateShapeColor(obj, ticket);
+                    }
+                };
+
+                const walkObjects = (objs) => {
+                    objs.forEach(obj => {
+                        obj.set({ selectable: false, evented: false });
                         if (obj.seatLabel) {
-                            updateObjectColor(obj, tickets);
+                            updateSeatVisual(obj);
+                        } else if (typeof obj.getObjects === 'function') {
+                            walkObjects(obj.getObjects());
                         }
-                        // If it's a group but seatLabel is on the group (TicketGenerator logic used Group's seatLabel)
-                        // Structure in LayoutEditor: Group has `seatLabel`.
-                        // Inside group: Circle + Text.
                     });
+                };
 
-                    c.renderAll();
-                    setStats({ total: totalSeats, sold, entered });
-                });
+                walkObjects(c.getObjects());
+                c.requestRenderAll();
+                setStats({ total: totalSeats, sold, entered });
+            } else {
+                setStats({ total: 0, sold, entered });
             }
 
         } catch (error) {
@@ -122,7 +131,8 @@ export default function SeatMonitor() {
 
     return (
         <div className="space-y-6 animate-in fade-in duration-500">
-            <header className="border-b border-slate-700 pb-6 flex justify-between items-center">
+            <EventNavTabs eventName={event?.name} />
+            <header className="border-b border-slate-800 pb-6 flex justify-between items-center">
                 <div>
                     <h2 className="text-3xl font-bold text-gray-100 flex items-center">
                         <Layers className="w-8 h-8 mr-3 text-indigo-500" />

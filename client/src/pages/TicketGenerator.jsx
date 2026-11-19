@@ -1,14 +1,13 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import api from '../api/axios';
-import html2canvas from 'html2canvas';
+import { toJpeg } from 'html-to-image';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import { Download, Users, Ticket as TicketIcon, Loader2, Trash2, Edit2, Smartphone, CheckCircle2, Archive } from 'lucide-react';
-import QRCode from 'qrcode';
-import TicketPreviewModal from '../components/TicketPreviewModal';
-
-const API_BASE_URL = 'http://localhost:3001';
+import { generateQRDataURL } from '../utils/qrEngine';
+import TicketPreviewModal, { TicketCard } from '../components/TicketPreviewModal';
+import EventNavTabs from '../components/EventNavTabs';
 
 export default function TicketGenerator() {
     const { id } = useParams();
@@ -22,13 +21,17 @@ export default function TicketGenerator() {
     // Config for consolidated tickets
     const [consolidated, setConsolidated] = useState(false); // If true, 1 ticket for N people
 
-    // New: Seat Selection
+    // Seat Selection
     const [availableSeats, setAvailableSeats] = useState([]);
     const [selectedSeat, setSelectedSeat] = useState('');
 
     // Modal State
     const [isPreviewOpen, setIsPreviewOpen] = useState(false);
     const [justGeneratedTickets, setJustGeneratedTickets] = useState([]);
+
+    // Refs for hidden TicketCard captures (avoids duplicate IDs and Tailwind oklch issues)
+    const desktopRefs = useRef({});
+    const mobileRefs = useRef({});
 
     // Editing State
     const [editingTicketId, setEditingTicketId] = useState(null);
@@ -45,19 +48,18 @@ export default function TicketGenerator() {
             setEvent(res.data);
             if (res.data.layout) {
                 try {
-                    const canvasData = JSON.parse(res.data.layout);
-                    // Extract seats (objects with seatLabel)
+                    const canvasData = typeof res.data.layout === 'string'
+                        ? JSON.parse(res.data.layout)
+                        : res.data.layout;
                     const seats = [];
-                    // Handle recursive helper if groups
                     const extractSeats = (objs) => {
                         objs.forEach(obj => {
                             if (obj.seatLabel) seats.push(obj.seatLabel);
-                            if (obj.objects) extractSeats(obj.objects); // In case of Groups within Groups
-                            // Note: Fabric structure for Group: obj.objects
+                            if (obj.objects) extractSeats(obj.objects);
                         });
                     };
-                    if (canvasData.objects) extractSeats(canvasData.objects);
-                    setAvailableSeats(seats.sort());
+                    if (canvasData?.objects) extractSeats(canvasData.objects);
+                    setAvailableSeats(Array.from(new Set(seats)).sort());
                 } catch (e) {
                     console.error("Error parsing layout", e);
                 }
@@ -66,36 +68,44 @@ export default function TicketGenerator() {
         });
     }, [id]);
 
+    const occupiedSeats = new Set(
+        existingTickets
+            .filter(t => t.seatId && t.status !== 'revoked')
+            .map(t => t.seatId)
+    );
+
     const handleGenerate = async () => {
+        const parsedQty = Math.max(1, parseInt(quantity, 10) || 1);
         setIsGenerating(true);
         try {
             const res = await api.post('/tickets/generate', {
                 eventId: id,
-                quantity: selectedSeat ? 1 : (consolidated ? 1 : quantity),
+                quantity: selectedSeat ? 1 : (consolidated ? 1 : parsedQty),
                 holderName: holderName || 'Portador',
                 seatId: selectedSeat || null,
-                pax: selectedSeat ? 1 : (consolidated ? quantity : 1)
+                pax: selectedSeat ? 1 : (consolidated ? parsedQty : 1)
             });
 
-            // Generate QR data URLs locally
-            const ticketsWithQRs = await Promise.all(res.data.map(async (t) => {
-                const qr = await QRCode.toDataURL(t.folio);
-                return { ...t, qrCodeData: qr, pax: selectedSeat ? 1 : (consolidated ? quantity : 1) };
+            // Generate QR data URLs locally with our pure-JS engine
+            const ticketsWithQRs = res.data.map((t) => ({
+                ...t,
+                qrCodeData: generateQRDataURL(t.folio, { width: 256, margin: 0 }),
+                pax: selectedSeat ? 1 : (consolidated ? parsedQty : 1)
             }));
 
             setJustGeneratedTickets(ticketsWithQRs);
             setIsPreviewOpen(true);
-            setTickets(ticketsWithQRs); 
+            setTickets(ticketsWithQRs);
 
-            // Auto-save to server in background
-            setTimeout(() => saveImagesToServer(ticketsWithQRs), 1500);
+            // Auto-save to server in background after TicketCard QR effects settle
+            setTimeout(() => saveImagesToServer(ticketsWithQRs), 1200);
 
             if (selectedSeat) setSelectedSeat('');
             fetchExistingTickets();
 
         } catch (error) {
             console.error("Error generating tickets", error);
-            alert("Error al generar tickets. Verifique la conexión.");
+            alert(error.response?.data?.error || "Error al generar tickets. Verifique la conexión.");
         } finally {
             setIsGenerating(false);
         }
@@ -126,22 +136,31 @@ export default function TicketGenerator() {
         }
     };
 
-    const handleRedownload = async (ticket) => {
-        const qr = await QRCode.toDataURL(ticket.folio);
+    const handleRedownload = (ticket) => {
+        const qr = generateQRDataURL(ticket.folio, { width: 256, margin: 0 });
         const tWithQR = { ...ticket, qrCodeData: qr };
         setJustGeneratedTickets([tWithQR]);
         setIsPreviewOpen(true);
     };
 
+    const captureNodeToJpeg = async (node) => {
+        if (!node) return null;
+        return await toJpeg(node, {
+            quality: 0.94,
+            pixelRatio: 2,
+            backgroundColor: '#0f172a',
+            skipFonts: true,
+        });
+    };
+
     const saveImagesToServer = async (ticketList) => {
         for (const ticket of ticketList) {
             try {
-                // Ensure they are rendered in the DOM before capturing
                 await new Promise(r => setTimeout(r, 200));
 
-                const desktopImg = await captureElement(`ticket-${ticket.folio}`, 800, 220);
-                const mobileImg = await captureElement(`mobile-ticket-${ticket.folio}`, 450, 800);
-                
+                const desktopImg = await captureNodeToJpeg(desktopRefs.current[ticket.folio]);
+                const mobileImg = await captureNodeToJpeg(mobileRefs.current[ticket.folio]);
+
                 if (desktopImg) {
                     await api.post('/tickets/save-image', {
                         image: desktopImg,
@@ -166,19 +185,10 @@ export default function TicketGenerator() {
         }
     };
 
-    const captureElement = async (id, w, h) => {
-        const element = document.getElementById(id);
-        if (!element) return null;
-        const canvas = await html2canvas(element, { scale: 2, width: w, height: h, useCORS: true, backgroundColor: '#ffffff' });
-        return canvas.toDataURL('image/jpeg', 0.9);
-    };
-
-    const handleDownloadAllZip = async (mode = 'desktop') => {
+    const handleDownloadAllZip = async () => {
         if (existingTickets.length === 0) return;
-        setIsGenerating(true); 
+        setIsGenerating(true);
         try {
-            console.log("Preparando historial para descarga por lote...");
-            // Trigger preview with all existing tickets to allow the modal to handle the ZIP capture
             setJustGeneratedTickets(existingTickets);
             setIsPreviewOpen(true);
         } catch (error) {
@@ -192,27 +202,24 @@ export default function TicketGenerator() {
         if (tickets.length === 0) return;
         setIsGenerating(true);
         try {
-            console.log(`Iniciando compresión de lote JPG (${mode})...`);
             const zip = new JSZip();
             for (const ticket of tickets) {
-                const elementId = mode === 'desktop' ? `ticket-${ticket.folio}` : `mobile-ticket-${ticket.folio}`;
-                const element = document.getElementById(elementId);
-                
-                if (element) {
-                    const canvas = await html2canvas(element, { 
-                        scale: 2, 
-                        useCORS: true, 
-                        backgroundColor: '#ffffff'
-                    });
-                    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.95));
-                    zip.file(`Boleto-${ticket.folio}-${mode}.jpg`, blob);
+                const node = mode === 'desktop'
+                    ? desktopRefs.current[ticket.folio]
+                    : mobileRefs.current[ticket.folio];
+
+                if (node) {
+                    const dataUrl = await captureNodeToJpeg(node);
+                    if (dataUrl) {
+                        const base64 = dataUrl.split(',')[1];
+                        zip.file(`Boleto-${ticket.folio}-${mode}.jpg`, base64, { base64: true });
+                    }
                 }
             }
             const content = await zip.generateAsync({ type: 'blob' });
             saveAs(content, `Lote-${event.name}-${mode}.zip`);
-            console.log("ZIP generado y descargado.");
         } catch (error) {
-            console.log("Error ZIP:", error);
+            console.error("Error ZIP:", error);
             alert("Error al generar el ZIP. Reintente.");
         } finally {
             setIsGenerating(false);
@@ -223,7 +230,8 @@ export default function TicketGenerator() {
 
     return (
         <div className="space-y-8 animate-in fade-in duration-500">
-            <header className="border-b border-slate-700 pb-6">
+            <EventNavTabs eventName={event.name} />
+            <header className="border-b border-slate-800 pb-6">
                 <h2 className="text-3xl font-bold text-gray-100 flex items-center">
                     <TicketIcon className="w-8 h-8 mr-3 text-indigo-500" />
                     Generador de Tickets
@@ -250,8 +258,8 @@ export default function TicketGenerator() {
             <div className="bg-slate-800 p-6 rounded-2xl shadow-xl border border-slate-700/50">
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
 
-                    {/* Quantity or Seat Selection */}
-                    {availableSeats.length > 0 ? (
+                    {/* Seat Selection (if layout has seats) */}
+                    {availableSeats.length > 0 && (
                         <div>
                             <label className="block text-sm font-medium text-slate-400 mb-1">Asignar Asiento</label>
                             <select
@@ -259,16 +267,24 @@ export default function TicketGenerator() {
                                 value={selectedSeat}
                                 onChange={e => {
                                     setSelectedSeat(e.target.value);
-                                    if (e.target.value) setQuantity(1); // Force qty 1 if seat selected
+                                    if (e.target.value) setQuantity(1);
                                 }}
                             >
                                 <option value="">-- Sin Asiento / General --</option>
-                                {availableSeats.map(seat => (
-                                    <option key={seat} value={seat}>{seat}</option>
-                                ))}
+                                {availableSeats.map(seat => {
+                                    const isTaken = occupiedSeats.has(seat);
+                                    return (
+                                        <option key={seat} value={seat} disabled={isTaken}>
+                                            {seat}{isTaken ? ' (Ocupado)' : ''}
+                                        </option>
+                                    );
+                                })}
                             </select>
                         </div>
-                    ) : (
+                    )}
+
+                    {/* Quantity Input (shown whenever General / no seat is selected) */}
+                    {!selectedSeat && (
                         <div>
                             <label className="block text-sm font-medium text-slate-400 mb-1">Cantidad de Personas</label>
                             <input
@@ -345,7 +361,6 @@ export default function TicketGenerator() {
                     <div key={idx} className="w-full flex justify-center">
                         {/* Desktop Ticket Render */}
                         <div
-                            id={`ticket-${ticket.folio}`}
                             className="bg-white text-slate-900 w-full max-w-5xl aspect-[9/2.5] flex overflow-hidden shadow-2xl relative border border-slate-200"
                             style={{ minHeight: '220px' }}
                         >
@@ -507,134 +522,31 @@ export default function TicketGenerator() {
                 </div>
             </div>
 
-            {/* Hidden Render Lists for ZIP/Auto-Save (Rescue Version) */}
-            <div 
-                style={{ 
-                    position: 'fixed', 
-                    top: 0, 
-                    left: '-3000px', 
-                    zIndex: -100, 
-                    opacity: 0, 
-                    pointerEvents: 'none',
-                    background: '#0f172a'
-                }}
-            >
-                {tickets.map((ticket, idx) => (
-                    <div
-                        key={`mobile-capture-${idx}`}
-                        id={`mobile-ticket-${ticket.folio}`}
-                        className="bg-[#0f172a] text-white relative flex flex-col items-center p-14 overflow-hidden"
-                        style={{ width: '450px', height: '800px' }} 
-                    >
-                        <div className="absolute top-0 left-0 w-full h-3 bg-gradient-to-r from-indigo-500 via-indigo-600 to-indigo-700"></div>
-                        
-                        <div className="w-full mb-16 mt-6 flex items-center justify-center">
-                            <div className="flex items-center gap-6 py-3 px-8 bg-slate-900 rounded-[2rem] border border-slate-800/50 shadow-inner">
-                                <span className="text-7xl font-black text-indigo-500 tracking-tighter">T-λ</span>
-                                <div className="w-[3px] h-14 bg-slate-800"></div>
-                                <div className="text-left font-black">
-                                    <p className="text-xs uppercase text-slate-500 tracking-[0.3em] leading-none mb-1">Lambda</p>
-                                    <p className="text-2xl text-white leading-none">TICKET</p>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="w-full text-center px-6 mb-4">
-                            <h2 className="text-4xl font-black uppercase text-white leading-tight tracking-tighter opacity-90">
-                                {event.name}
-                            </h2>
-                            <p className="text-2xl text-indigo-400 font-black mt-2">
-                                {new Date(event.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                            </p>
-                            <div className="h-1.5 w-16 bg-indigo-600 mx-auto mt-6 rounded-full"></div>
-                        </div>
-
-                        <div className="my-auto">
-                            <div className="bg-white p-8 rounded-[3rem] shadow-2xl">
-                                <TicketQR folio={ticket.folio} size={220} />
-                            </div>
-                        </div>
-
-                        {/* REPAIRED NAME BOX FOR ZIPs */}
-                        <div className="w-[85%] mx-auto mt-12 bg-slate-900/60 p-10 rounded-[3rem] border border-white/5 text-left overflow-visible">
-                            <p className="text-xs font-black text-indigo-400 uppercase tracking-[0.3em] mb-2">Invitado Especial</p>
-                            <p className="text-4xl font-black text-white break-words leading-tight">
-                                {ticket.holderName}
-                            </p>
-                            {ticket.seatId && (
-                                <div className="pt-4 border-t border-white/10 mt-4">
-                                    <p className="text-xs font-black text-indigo-400 uppercase tracking-[0.3em] mb-1">Ubicación</p>
-                                    <p className="text-3xl font-black text-white">{ticket.seatId}</p>
-                                </div>
-                            )}
-                        </div>
-
-                        <div className="w-full mt-16 mb-6 text-center">
-                            <p className="font-mono text-sm font-black text-slate-600 uppercase tracking-[0.8em]">
-                                {ticket.folio.split('-').pop()}
-                            </p>
-                        </div>
-                    </div>
-                ))}
-            </div>
-
-            {/* Hidden Render List para Tiras (Desktop/ZIP) - GHOST RENDERER PRO */}
-            <div 
-                style={{ 
-                    position: 'fixed', 
-                    top: 0, 
-                    left: 0, 
-                    zIndex: -1000, 
-                    opacity: 0.01, 
+            {/* Offscreen TicketCard Renders for html-to-image ZIP/Auto-Save */}
+            <div
+                style={{
+                    position: 'fixed',
+                    top: 0,
+                    left: '-3000px',
+                    zIndex: -100,
+                    opacity: 0,
                     pointerEvents: 'none',
                 }}
             >
-                {tickets.map((ticket, idx) => (
-                    <div 
-                        key={`desktop-capture-${idx}`}
-                        id={`ticket-${ticket.folio}`} 
-                        className="bg-[#0f172a] text-white flex overflow-hidden relative shrink-0"
-                        style={{ width: '800px', height: '220px' }}
-                    >
-                        <div className="w-1/4 bg-slate-900 border-r border-white/5 flex items-center justify-center relative overflow-hidden">
-                            <span className="text-white/10 font-black text-8xl -rotate-90 tracking-tighter opacity-20 absolute top-0 left-0 transform -translate-x-12">LAMBDA</span>
-                            <span className="text-white font-black text-8xl tracking-tighter italic relative z-10">T-λ</span>
-                        </div>
-                        
-                        <div className="flex-1 p-10 flex flex-col justify-between relative bg-gradient-to-br from-slate-900 to-indigo-950 text-left">
-                            <div>
-                                <div className="flex items-center gap-4 mb-4">
-                                    <span className="bg-indigo-600 text-[10px] font-black uppercase tracking-[0.3em] px-4 py-1.5 rounded-full">Official Event</span>
-                                    <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{new Date(event.date).toLocaleDateString()}</span>
-                                </div>
-                                <h1 className="text-5xl font-black uppercase text-white leading-none tracking-tighter">{event.name}</h1>
-                            </div>
-                            
-                            <div className="flex justify-between items-end border-t border-white/10 pt-8">
-                                <div>
-                                    <p className="text-[9px] text-slate-500 font-black uppercase tracking-[0.4em] mb-2">Portador</p>
-                                    <p className="font-black text-4xl leading-none text-white tracking-tight">{ticket.holderName}</p>
-                                </div>
-                                <div className="flex gap-10 text-right">
-                                    <div>
-                                        <p className="text-[9px] text-slate-500 font-black uppercase tracking-[0.4em] mb-1">Apertura</p>
-                                        <p className="font-black text-3xl leading-none text-white">{new Date(event.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
-                                    </div>
-                                    {ticket.seatId && (
-                                        <div>
-                                            <p className="text-[9px] text-slate-500 font-black uppercase tracking-[0.4em] mb-1">Zona</p>
-                                            <p className="font-black text-3xl leading-none text-indigo-400 italic">{ticket.seatId}</p>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="w-[220px] bg-white p-10 flex flex-col items-center justify-center relative shadow-inner">
-                            <div className="absolute inset-y-0 left-[-1px] w-[2px] border-l-2 border-dashed border-slate-900/10"></div>
-                            <TicketQR folio={ticket.folio} size={130} />
-                            <p className="font-mono font-black text-[10px] tracking-[0.5em] text-slate-400 mt-6 uppercase">{ticket.folio.split('-').pop()}</p>
-                        </div>
+                {tickets.map((ticket) => (
+                    <div key={`capture-${ticket.folio}`}>
+                        <TicketCard
+                            ref={el => { desktopRefs.current[ticket.folio] = el; }}
+                            ticket={ticket}
+                            event={event}
+                            mode="desktop"
+                        />
+                        <TicketCard
+                            ref={el => { mobileRefs.current[ticket.folio] = el; }}
+                            ticket={ticket}
+                            event={event}
+                            mode="mobile"
+                        />
                     </div>
                 ))}
             </div>
@@ -648,23 +560,3 @@ export default function TicketGenerator() {
         </div>
     );
 }
-
-// Sub-componente de QR compartido para asegurar visibilidad total y evitar iconos rotos
-const TicketQR = ({ folio, size = 120 }) => {
-    const [qrData, setQrData] = useState('');
-
-    useEffect(() => {
-        if (folio) {
-            QRCode.toDataURL(folio, { 
-                margin: 0, 
-                width: size * 2, 
-                color: { dark: '#000000', light: '#ffffff' }
-            })
-            .then(url => setQrData(url))
-            .catch(err => console.error("QR Local Error", err));
-        }
-    }, [folio, size]);
-
-    if (!qrData) return <div className="animate-pulse bg-slate-100 rounded-xl" style={{ width: size, height: size }}></div>;
-    return <img src={qrData} alt="QR" className="object-contain" style={{ width: size, height: size }} />;
-};

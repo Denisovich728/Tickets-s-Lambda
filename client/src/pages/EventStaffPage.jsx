@@ -1,12 +1,11 @@
-import { useParams } from 'react-router-dom';
 import StaffManager from '../components/StaffManager';
+import EventNavTabs from '../components/EventNavTabs';
 
 export default function EventStaffPage() {
-    const { id } = useParams();
-
     return (
         <div className="space-y-6">
-            <h2 className="text-2xl font-bold text-gray-900">Gestión de Personal</h2>
+            <EventNavTabs />
+            <h2 className="text-2xl font-bold text-white tracking-tight">Gestión de Personal del Evento</h2>
             <StaffManager />
         </div>
     );

@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import * as fabric from 'fabric';
-import { Square, Circle, Save, Trash2, Armchair } from 'lucide-react';
+import { Square, Circle, Save, Trash2, Armchair, Check } from 'lucide-react';
 
 export default function LayoutEditor({ initialData, onSave }) {
     const canvasRef = useRef(null);
+    const lastSavedRef = useRef(null);
     const [canvas, setCanvas] = useState(null);
     const [showGuides, setShowGuides] = useState(false);
     const [selectedObject, setSelectedObject] = useState(null);
     const [labelText, setLabelText] = useState('');
+    const [savedFeedback, setSavedFeedback] = useState(false);
 
     useEffect(() => {
         const c = new fabric.Canvas(canvasRef.current, {
@@ -17,27 +19,71 @@ export default function LayoutEditor({ initialData, onSave }) {
         });
         setCanvas(c);
 
-        c.on('selection:created', (e) => handleSelection(e.selected[0]));
-        c.on('selection:updated', (e) => handleSelection(e.selected[0]));
+        c.on('selection:created', (e) => handleSelection(e.selected?.[0]));
+        c.on('selection:updated', (e) => handleSelection(e.selected?.[0]));
         c.on('selection:cleared', () => {
             setSelectedObject(null);
             setLabelText('');
         });
-
-        if (initialData) {
-            c.loadFromJSON(initialData, c.renderAll.bind(c));
-        }
 
         return () => {
             c.dispose();
         };
     }, []);
 
+    // Load initialData when canvas is ready or initialData arrives asynchronously
+    useEffect(() => {
+        if (!canvas || !initialData) return;
+        const serialized = typeof initialData === 'string' ? initialData : JSON.stringify(initialData);
+        if (serialized === lastSavedRef.current) return;
+
+        let cancelled = false;
+        const loadLayout = async () => {
+            try {
+                const parsed = typeof initialData === 'string' ? JSON.parse(initialData) : initialData;
+                await canvas.loadFromJSON(parsed);
+                if (!cancelled) {
+                    canvas.getObjects().forEach(obj => {
+                        if (obj.isGuide) canvas.remove(obj);
+                    });
+                    canvas.requestRenderAll();
+                }
+            } catch (err) {
+                console.error('Error loading layout JSON:', err);
+            }
+        };
+        loadLayout();
+        return () => { cancelled = true; };
+    }, [canvas, initialData]);
+
+    // Support Delete/Backspace keyboard shortcut
+    useEffect(() => {
+        if (!canvas) return;
+        const handleKeyDown = (e) => {
+            const tag = e.target?.tagName?.toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+            if (e.key === 'Delete' || e.key === 'Backspace') {
+                const activeObjects = canvas.getActiveObjects();
+                if (activeObjects.length > 0) {
+                    e.preventDefault();
+                    activeObjects.forEach(obj => {
+                        if (!obj.isGuide) canvas.remove(obj);
+                    });
+                    canvas.discardActiveObject();
+                    setSelectedObject(null);
+                    setLabelText('');
+                    canvas.requestRenderAll();
+                }
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [canvas]);
+
     // Toggle Symmetry Guides
     useEffect(() => {
         if (!canvas) return;
-        // Clear previous guides
-        const objects = canvas.getObjects();
+        const objects = [...canvas.getObjects()];
         objects.forEach(obj => {
             if (obj.isGuide) canvas.remove(obj);
         });
@@ -60,99 +106,134 @@ export default function LayoutEditor({ initialData, onSave }) {
             lineH.isGuide = true;
 
             canvas.add(lineV, lineH);
-            canvas.renderAll();
         }
+        canvas.requestRenderAll();
     }, [showGuides, canvas]);
 
     const handleSelection = (obj) => {
+        if (!obj) return;
         setSelectedObject(obj);
-        // If it's a group, check if it has a label text object
-        if (obj.type === 'group') {
-            const textObj = obj.getObjects().find(o => o.type === 'text');
-            if (textObj) setLabelText(textObj.text);
+        if (typeof obj.getObjects === 'function') {
+            const textObj = obj.getObjects().find(o => o.type?.toLowerCase() === 'text' || o.type?.toLowerCase() === 'i-text');
+            setLabelText(textObj ? textObj.text : (obj.seatLabel || ''));
         } else {
-            // If manual property
             setLabelText(obj.seatLabel || '');
         }
     };
 
     const updateLabel = (text) => {
         setLabelText(text);
-        if (selectedObject) {
-            if (selectedObject.type === 'group') {
-                const textObj = selectedObject.getObjects().find(o => o.type === 'text');
-                if (textObj) {
-                    textObj.set('text', text);
-                    selectedObject.set('seatLabel', text); // Custom prop
-                    selectedObject.addWithUpdate(); // Recalc bounds
-                    canvas.renderAll();
-                }
-            } else {
+        if (!selectedObject || !canvas) return;
+
+        if (typeof selectedObject.getObjects === 'function') {
+            const textObj = selectedObject.getObjects().find(o => o.type?.toLowerCase() === 'text' || o.type?.toLowerCase() === 'i-text');
+            if (textObj) {
+                textObj.set('text', text);
                 selectedObject.set('seatLabel', text);
+                selectedObject.set('dirty', true);
+                if (typeof selectedObject.triggerLayout === 'function') {
+                    selectedObject.triggerLayout();
+                }
+                canvas.requestRenderAll();
+                return;
             }
         }
+        selectedObject.set('seatLabel', text);
+        canvas.requestRenderAll();
+    };
+
+    const getNextSeatLabel = () => {
+        if (!canvas) return 'A1';
+        const existingLabels = new Set(
+            canvas.getObjects()
+                .map(o => o.seatLabel)
+                .filter(Boolean)
+        );
+        let index = 1;
+        while (existingLabels.has(`A${index}`)) {
+            index++;
+        }
+        return `A${index}`;
     };
 
     const addChair = () => {
         if (!canvas) return;
+        const nextLabel = getNextSeatLabel();
         const circle = new fabric.Circle({
-            radius: 12,
+            radius: 14,
             fill: '#cbd5e1',
             stroke: '#475569',
-            strokeWidth: 1,
+            strokeWidth: 1.5,
             originX: 'center',
             originY: 'center'
         });
 
-        const text = new fabric.Text('A1', {
+        const text = new fabric.Text(nextLabel, {
             fontSize: 10,
+            fontWeight: 'bold',
             originX: 'center',
             originY: 'center',
-            fill: '#334155'
+            fill: '#0f172a'
         });
 
         const group = new fabric.Group([circle, text], {
             left: 150,
             top: 150,
-            seatLabel: 'A1' // Custom Property
+            seatLabel: nextLabel
         });
 
         canvas.add(group);
         canvas.setActiveObject(group);
+        canvas.requestRenderAll();
     };
-
-    // ... (Existing table functions can remain simple or become groups too)
 
     const addRectTable = () => {
         if (!canvas) return;
         const rect = new fabric.Rect({
-            left: 100, top: 100, fill: '#a5b4fc', width: 60, height: 60, stroke: '#4338ca', strokeWidth: 2, rx: 4, ry: 4
+            left: 100, top: 100, fill: '#a5b4fc', width: 70, height: 70, stroke: '#4338ca', strokeWidth: 2, rx: 6, ry: 6
         });
         canvas.add(rect);
+        canvas.setActiveObject(rect);
+        canvas.requestRenderAll();
     };
 
     const addRoundTable = () => {
         if (!canvas) return;
         const circle = new fabric.Circle({
-            radius: 35, fill: '#fca5a5', left: 100, top: 100, stroke: '#b91c1c', strokeWidth: 2
+            radius: 38, fill: '#fca5a5', left: 100, top: 100, stroke: '#b91c1c', strokeWidth: 2
         });
         canvas.add(circle);
+        canvas.setActiveObject(circle);
+        canvas.requestRenderAll();
     };
 
     const deleteSelected = () => {
         if (!canvas) return;
-        const activeObject = canvas.getActiveObject();
-        if (activeObject) {
-            canvas.remove(activeObject);
+        const activeObjects = canvas.getActiveObjects();
+        if (activeObjects.length > 0) {
+            activeObjects.forEach(obj => {
+                if (!obj.isGuide) canvas.remove(obj);
+            });
+            canvas.discardActiveObject();
             setSelectedObject(null);
+            setLabelText('');
+            canvas.requestRenderAll();
         }
     };
 
     const handleSave = () => {
         if (!canvas) return;
-        // Clean guides before saving? Or just exclude them
-        const json = JSON.stringify(canvas.toJSON(['seatLabel'])); // Include custom property
+        const raw = canvas.toObject(['seatLabel', 'isGuide']);
+        if (Array.isArray(raw.objects)) {
+            raw.objects = raw.objects
+                .filter(o => !o.isGuide)
+                .map(({ isGuide: _ignored, ...rest }) => rest);
+        }
+        const json = JSON.stringify(raw);
+        lastSavedRef.current = json;
         onSave(json);
+        setSavedFeedback(true);
+        setTimeout(() => setSavedFeedback(false), 2500);
     };
 
     return (
@@ -192,8 +273,9 @@ export default function LayoutEditor({ initialData, onSave }) {
                 <button type="button" onClick={deleteSelected} className="flex items-center px-4 py-2 bg-red-900/30 hover:bg-red-900/50 text-red-400 border border-red-900/50 rounded-lg transition-colors">
                     <Trash2 className="h-4 w-4 mr-2" /> Eliminar
                 </button>
-                <button type="button" onClick={handleSave} className="flex items-center px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow-lg shadow-indigo-500/20 font-medium transition-all">
-                    <Save className="h-4 w-4 mr-2" /> Guardar
+                <button type="button" onClick={handleSave} className={`flex items-center px-4 py-2 rounded-lg shadow-lg font-medium transition-all ${savedFeedback ? 'bg-emerald-600 text-white shadow-emerald-500/20' : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-500/20'}`}>
+                    {savedFeedback ? <Check className="h-4 w-4 mr-2" /> : <Save className="h-4 w-4 mr-2" />}
+                    {savedFeedback ? 'Mapa Aplicado' : 'Aplicar Mapa'}
                 </button>
             </div>
 

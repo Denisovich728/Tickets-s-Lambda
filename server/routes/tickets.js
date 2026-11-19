@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const { Ticket, Event } = require('../models');
-const QRCode = require('qrcode');
 const { authenticateToken } = require('./auth');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
@@ -10,6 +9,10 @@ const path = require('path');
 router.post('/save-image', authenticateToken, async (req, res) => {
     const { image, folio, eventName, mode, ext } = req.body;
     try {
+        if (!image || !folio || !eventName || !mode) {
+            return res.status(400).json({ error: 'Missing required image fields' });
+        }
+
         const sanitizedEventName = eventName.replace(/[/\\?%*:|"<>]/g, '-').trim();
         const eventFolder = path.join(__dirname, '..', 'public', 'eventos', sanitizedEventName);
         
@@ -37,21 +40,31 @@ router.post('/generate', authenticateToken, async (req, res) => {
         const event = await Event.findByPk(eventId);
         if (!event) return res.status(404).json({ error: 'Event not found' });
 
+        if (seatId) {
+            const existingSeatTicket = await Ticket.findOne({
+                where: { eventId, seatId }
+            });
+            if (existingSeatTicket && existingSeatTicket.status !== 'revoked') {
+                return res.status(400).json({ error: `El asiento ${seatId} ya está asignado.` });
+            }
+        }
+
         const tickets = [];
-        // If seatId is provided, force quantity to 1 (or handle multiple seats logic later)
-        const qty = seatId ? 1 : quantity;
+        // If seatId is provided, force quantity to 1
+        const qty = seatId ? 1 : Math.max(1, parseInt(quantity, 10) || 1);
+        const parsedPax = seatId ? 1 : Math.max(1, parseInt(pax, 10) || 1);
 
         for (let i = 0; i < qty; i++) {
             const folio = `${event.type.substring(0, 3).toUpperCase()}-${Date.now()}-${uuidv4().substring(0, 4).toUpperCase()}`;
-            const qrData = JSON.stringify({ folio, eventId, seatId, pax: pax || 1 });
+            const qrData = JSON.stringify({ folio, eventId, seatId: seatId || null, pax: parsedPax });
 
             const ticket = await Ticket.create({
                 folio,
                 qrCodeData: qrData,
                 eventId,
-                holderName,
+                holderName: holderName || 'Portador',
                 seatId: seatId || null,
-                pax: pax || 1,
+                pax: parsedPax,
                 status: 'generated'
             });
 
@@ -112,9 +125,12 @@ router.get('/event/:id', authenticateToken, async (req, res) => {
             const ticketData = t.toJSON();
             if (ticketData.Event) {
                 const sanitizedEventName = ticketData.Event.name.replace(/[/\\?%*:|"<>]/g, '-').trim();
+                const eventFolder = path.join(__dirname, '..', 'public', 'eventos', sanitizedEventName);
+                const desktopExt = fs.existsSync(path.join(eventFolder, `${ticketData.folio}_desktop.png`)) ? 'png' : 'jpg';
+                const mobileExt = fs.existsSync(path.join(eventFolder, `${ticketData.folio}_mobile.png`)) ? 'png' : 'jpg';
                 ticketData.imageUrls = {
-                    desktop: `/public/eventos/${sanitizedEventName}/${ticketData.folio}_desktop.png`,
-                    mobile: `/public/eventos/${sanitizedEventName}/${ticketData.folio}_mobile.png`
+                    desktop: `/public/eventos/${sanitizedEventName}/${ticketData.folio}_desktop.${desktopExt}`,
+                    mobile: `/public/eventos/${sanitizedEventName}/${ticketData.folio}_mobile.${mobileExt}`
                 };
             }
             return ticketData;
@@ -135,7 +151,17 @@ router.put('/:id', authenticateToken, async (req, res) => {
         if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
 
         if (holderName !== undefined) ticket.holderName = holderName;
-        if (pax !== undefined) ticket.pax = pax;
+        if (pax !== undefined) {
+            const parsedPax = Math.max(1, parseInt(pax, 10) || 1);
+            ticket.pax = parsedPax;
+            try {
+                const parsedQr = JSON.parse(ticket.qrCodeData);
+                parsedQr.pax = parsedPax;
+                ticket.qrCodeData = JSON.stringify(parsedQr);
+            } catch {
+                // Keep existing qrCodeData if not JSON
+            }
+        }
 
         await ticket.save();
         res.json(ticket);

@@ -1,24 +1,20 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { X, Download, CheckCircle2, Archive as ZipIcon, Loader2, ShieldCheck, Zap } from 'lucide-react';
+import React, { useMemo, useState, useRef } from 'react';
+import { X, Download, Archive as ZipIcon, Loader2, ShieldCheck, Zap } from 'lucide-react';
 import { toJpeg } from 'html-to-image';
-import QRCode from 'qrcode';
+import { generateQRDataURL } from '../utils/qrEngine';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 
-// Local QR renderer using data URL
+// Local QR renderer using our pure-JS QR engine (zero external dependencies)
 const TicketQR = ({ folio, size = 128 }) => {
-    const [qrData, setQrData] = useState('');
-
-    useEffect(() => {
-        if (folio) {
-            QRCode.toDataURL(folio, {
-                margin: 0,
-                width: size * 2,
-                color: { dark: '#000000', light: '#ffffff' }
-            })
-            .then(url => setQrData(url))
-            .catch(err => console.error('QR Error', err));
-        }
+    const qrData = useMemo(() => {
+        if (!folio) return '';
+        return generateQRDataURL(folio, {
+            width: size * 2,
+            margin: 0,
+            darkColor: '#000000',
+            lightColor: '#ffffff',
+        });
     }, [folio, size]);
 
     if (!qrData) return <div style={{ width: size, height: size, background: '#e2e8f0', borderRadius: 8 }} />;
@@ -27,7 +23,7 @@ const TicketQR = ({ folio, size = 128 }) => {
 
 // Ticket visual — rendered inline in the preview.
 // Uses 100% inline hex styles so html-to-image captures it perfectly.
-const TicketCard = React.forwardRef(({ ticket, event, mode }, ref) => {
+export const TicketCard = React.forwardRef(({ ticket, event, mode }, ref) => {
     const isMobile = mode === 'mobile';
 
     const C = {
@@ -87,6 +83,11 @@ const TicketCard = React.forwardRef(({ ticket, event, mode }, ref) => {
                     <h3 style={{ fontSize: 30, fontWeight: 900, color: C.white, wordBreak: 'break-word', lineHeight: 1.1, margin: '0 0 12px 0' }}>
                         {ticket.holderName}
                     </h3>
+                    {ticket.pax > 1 && (
+                        <p style={{ fontSize: 12, fontWeight: 800, color: C.accent, textTransform: 'uppercase', letterSpacing: 2, margin: '0 0 8px 0' }}>
+                            Acceso para {ticket.pax} personas
+                        </p>
+                    )}
                     {ticket.seatId && (
                         <div style={{ paddingTop: 14, borderTop: '1px solid rgba(255,255,255,0.1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                             <p style={{ fontSize: 9, fontWeight: 900, color: C.sl500, textTransform: 'uppercase', letterSpacing: 4, margin: 0 }}>Ubicación</p>
@@ -129,6 +130,11 @@ const TicketCard = React.forwardRef(({ ticket, event, mode }, ref) => {
                     <div>
                         <p style={{ fontSize: 8, color: C.sl500, fontWeight: 900, textTransform: 'uppercase', letterSpacing: 5, margin: '0 0 3px 0' }}>Portador</p>
                         <p style={{ fontWeight: 900, fontSize: 30, color: C.white, letterSpacing: -1, margin: 0 }}>{ticket.holderName}</p>
+                        {ticket.pax > 1 && (
+                            <p style={{ fontSize: 10, fontWeight: 800, color: C.accent, textTransform: 'uppercase', letterSpacing: 2, margin: '4px 0 0 0' }}>
+                                Grupo: {ticket.pax} personas
+                            </p>
+                        )}
                     </div>
                     <div style={{ display: 'flex', gap: 28, textAlign: 'right' }}>
                         <div>
@@ -208,6 +214,7 @@ export default function TicketPreviewModal({ isOpen, onClose, tickets, event }) 
             saveAs(content, `Lote-${event?.name || 'Tickets'}.zip`);
         } catch (err) {
             console.error('Zip Error', err);
+            alert('Error al generar el ZIP: ' + err.message);
         } finally {
             setIsDownloading(false);
         }
@@ -217,30 +224,30 @@ export default function TicketPreviewModal({ isOpen, onClose, tickets, event }) 
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
             <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-3xl" onClick={onClose} />
 
-            <div className="relative w-full max-w-6xl bg-slate-950 border border-white/5 rounded-[4rem] shadow-[0_0_100px_rgba(0,0,0,0.8)] flex flex-col max-h-[94vh] overflow-hidden animate-in zoom-in-95 duration-500">
+            <div className="relative w-full max-w-6xl bg-slate-950 border border-slate-800/80 rounded-2xl shadow-2xl flex flex-col max-h-[92vh] overflow-hidden animate-in zoom-in-95 duration-300">
 
                 {/* Header */}
-                <header className="sticky top-0 z-20 bg-slate-950/90 backdrop-blur-md p-10 border-b border-white/5 flex flex-col md:flex-row items-center justify-between gap-8">
-                    <div className="flex items-center gap-6">
-                        <div className="w-16 h-16 bg-indigo-500/10 text-indigo-500 rounded-[2rem] flex items-center justify-center border border-indigo-500/20">
-                            <Zap size={30} className="animate-pulse" />
+                <header className="sticky top-0 z-20 bg-slate-950/95 backdrop-blur-md px-6 py-5 border-b border-slate-800/80 flex flex-col md:flex-row items-center justify-between gap-4">
+                    <div className="flex items-center gap-4">
+                        <div className="w-11 h-11 bg-indigo-500/10 text-indigo-400 rounded-xl flex items-center justify-center border border-indigo-500/20">
+                            <Zap size={20} />
                         </div>
                         <div>
-                            <h2 className="text-3xl font-black text-white uppercase tracking-tighter leading-none">PREVIEW PREMIUM</h2>
-                            <p className="text-slate-500 text-[10px] font-black uppercase tracking-[0.4em] mt-3">Lambda λ Generation Engine</p>
+                            <h2 className="text-lg font-bold text-white tracking-tight leading-none">Vista Previa de Boletos</h2>
+                            <p className="text-slate-400 text-xs mt-1">Motor QR Propio Lambda</p>
                         </div>
                     </div>
 
-                    <div className="flex bg-black p-2 rounded-[2.5rem] border border-white/5 shadow-inner">
-                        <button onClick={() => setViewMode('desktop')} className={`px-12 py-4 rounded-[2rem] text-[10px] font-black uppercase tracking-widest transition-all ${viewMode === 'desktop' ? 'bg-indigo-600 text-white shadow-2xl shadow-indigo-600/30' : 'text-slate-500 hover:text-white'}`}>Tira Desktop</button>
-                        <button onClick={() => setViewMode('mobile')} className={`px-12 py-4 rounded-[2rem] text-[10px] font-black uppercase tracking-widest transition-all ${viewMode === 'mobile' ? 'bg-indigo-600 text-white shadow-2xl shadow-indigo-600/30' : 'text-slate-500 hover:text-white'}`}>Móvil 9:16</button>
+                    <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-800">
+                        <button onClick={() => setViewMode('desktop')} className={`px-5 py-2 rounded-lg text-xs font-semibold transition-all ${viewMode === 'desktop' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}>Tira Desktop</button>
+                        <button onClick={() => setViewMode('mobile')} className={`px-5 py-2 rounded-lg text-xs font-semibold transition-all ${viewMode === 'mobile' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}>Móvil 9:16</button>
                     </div>
 
-                    <div className="flex items-center gap-6">
-                        <button onClick={handleDownloadAll} disabled={isDownloading} className="flex items-center gap-4 px-10 py-5 bg-white text-slate-950 hover:bg-slate-100 disabled:opacity-50 rounded-[2rem] transition-all font-black text-[10px] uppercase tracking-[0.3em] shadow-2xl active:scale-95">
-                            {isDownloading ? <Loader2 className="animate-spin" size={20} /> : <ZipIcon size={20} />} Descargar Lote (.zip)
+                    <div className="flex items-center gap-3">
+                        <button onClick={handleDownloadAll} disabled={isDownloading} className="flex items-center gap-2 px-4 py-2.5 bg-white text-slate-950 hover:bg-slate-100 disabled:opacity-50 rounded-xl transition-all font-semibold text-xs shadow-sm active:scale-95">
+                            {isDownloading ? <Loader2 className="animate-spin" size={16} /> : <ZipIcon size={16} />} Descargar Lote (.zip)
                         </button>
-                        <button onClick={onClose} className="p-2 text-slate-300 hover:text-white transition-colors"><X size={40} /></button>
+                        <button onClick={onClose} className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800/70 transition-colors"><X size={20} /></button>
                     </div>
                 </header>
 

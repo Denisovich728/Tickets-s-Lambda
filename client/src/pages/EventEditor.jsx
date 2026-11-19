@@ -3,8 +3,9 @@ import { useParams, useNavigate } from 'react-router-dom';
 import api from '../api/axios';
 import LayoutEditor from '../components/LayoutEditor';
 import StaffManager from '../components/StaffManager';
-import { Trash2, Users } from 'lucide-react';
+import { Trash2, Users, Map } from 'lucide-react';
 import ConfirmModal from '../components/ConfirmModal';
+import EventNavTabs from '../components/EventNavTabs';
 
 export default function EventEditor() {
     const { id } = useParams();
@@ -72,7 +73,9 @@ export default function EventEditor() {
     };
 
     return (
-        <div className="bg-slate-900/60 backdrop-blur-3xl p-8 rounded-[2rem] border border-slate-800 shadow-2xl relative overflow-hidden">
+        <div>
+            {id && <EventNavTabs eventName={event.name} />}
+            <div className="bg-slate-900/70 backdrop-blur-2xl p-8 rounded-2xl border border-slate-800/80 shadow-xl relative overflow-hidden">
             {/* Background Accent */}
             <div className="absolute -top-24 -right-24 w-64 h-64 bg-slate-800/20 rounded-full blur-[100px] pointer-events-none"></div>
 
@@ -144,9 +147,25 @@ export default function EventEditor() {
                                 className="w-full bg-slate-950/50 border border-slate-800 rounded-xl px-4 py-3.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:border-slate-600 focus:ring-1 focus:ring-slate-600 transition-all font-medium"
                                 placeholder="0"
                                 value={event.capacity}
-                                onChange={e => setEvent({ ...event, capacity: parseInt(e.target.value) })}
+                                onChange={e => setEvent({ ...event, capacity: parseInt(e.target.value, 10) || 0 })}
                             />
                         </div>
+                    </div>
+
+                    <div className="border-t border-slate-800/50 pt-10">
+                        <div className="flex items-center justify-between mb-6">
+                            <h3 className="text-xl font-bold text-white tracking-tight flex items-center gap-3">
+                                <Map size={24} className="text-indigo-400" />
+                                Creador de Mapa de Mesas y Asientos
+                            </h3>
+                            <span className="text-[10px] bg-slate-800 border border-slate-700 text-slate-400 px-3 py-1 rounded-full uppercase tracking-widest font-bold italic">
+                                {layoutData ? 'Mapa configurado' : 'Sin mapa'}
+                            </span>
+                        </div>
+                        <LayoutEditor
+                            initialData={layoutData}
+                            onSave={(json) => setLayoutData(json)}
+                        />
                     </div>
 
                     <div className="border-t border-slate-800/50 pt-10">
@@ -192,6 +211,7 @@ export default function EventEditor() {
                 onCancel={() => setIsConfirmOpen(false)}
                 confirmText="Sí, eliminar evento"
             />
+        </div>
         </div>
     );
 }
